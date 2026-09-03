@@ -9,11 +9,13 @@ what they actually have. Submitting syncs their roles to the checkboxes.
 
 Setup:
   1. pip install -r requirements.txt
-  2. Fill in BOT_TOKEN and SERVER_ID below.
+  2. Fill in BOT_TOKEN, SERVER_ID, and ALLOWED_ROLE_IDS below.
+     (Right-click a role in Server Settings > Roles with Developer Mode on
+     to Copy Role ID.)
   3. Have characters.txt in this same folder, one name per line.
   4. Run: python bot.py
-  5. In your server, run /choose-roles in the channel where you want the
-     pickers to appear. Anyone can run this command.
+  5. In your server, run /post-role-menus in the channel where you want the
+     pickers to appear. Only members with one of ALLOWED_ROLE_IDS can run it.
 """
 
 import discord
@@ -23,6 +25,7 @@ from discord.ext import commands
 # ==== CONFIGURATION — fill these in ====
 BOT_TOKEN = "PLACEHOLDER"
 SERVER_ID = 1403091108602576966
+ALLOWED_ROLE_IDS = [1450886692960604170, 1465857407195418886]  # members with ANY of these roles can run /post-role-menus
 CHARACTER_NAMES_FILE = "characters.txt"
 MAX_OPTIONS_PER_MENU = 25       # Discord's hard limit per select menu
 MAX_MENUS_PER_MESSAGE = 5       # Discord's hard limit: 5 component rows per message
@@ -39,7 +42,7 @@ def load_all_names() -> list[str]:
 
 def split_playable_and_npc(names: list[str]) -> tuple[list[str], list[str]]:
     """Split at the first point alphabetical order breaks. Everything before
-    that point is treated as playable umas, everything after as NPCs."""
+    that point is treated as playable Umas, everything after as NPCs."""
     for i in range(1, len(names)):
         if names[i].lower() < names[i - 1].lower():
             return names[:i], names[i:]
@@ -194,10 +197,11 @@ async def on_ready():
 
 
 @bot.tree.command(
-    name="choose-roles",
+    name="post-role-menus",
     description="Post the character role picker buttons in this channel.",
     guild=discord.Object(id=SERVER_ID),
 )
+@app_commands.checks.has_any_role(*ALLOWED_ROLE_IDS)
 async def post_role_menus(interaction: discord.Interaction):
     sections = build_sections()
 
@@ -212,6 +216,16 @@ async def post_role_menus(interaction: discord.Interaction):
                 "Click the button below to pick your favorites from this group.",
                 view=view,
             )
+
+
+@post_role_menus.error
+async def post_role_menus_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingAnyRole):
+        await interaction.response.send_message(
+            "You don't have permission to run this command.", ephemeral=True
+        )
+    else:
+        raise error
 
 
 if __name__ == "__main__":
