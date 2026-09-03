@@ -1,157 +1,82 @@
 """
-Character role picker bot for Discord.
-
-Presents members with dropdown menus (one per group of up to 25 characters)
-so they can self-select any number of "favorite character" roles.
+Bulk-create Discord roles from a list of names.
 
 Setup:
-  1. pip install -r requirements.txt
-  2. Fill in BOT_TOKEN and SERVER_ID below
-  3. Have characters.txt file with umas
-  4. Run: python bot.py
-  5. In server, run the /post-role-menus command in the channel
+  1. pip install requests
+  2. Fill in BOT_TOKEN and GUILD_ID below.
+  3. Put one character name per line in characters.txt (same folder as this script).
+  4. Run: python create_roles.py
 """
 
-import discord
-from discord import app_commands
-from discord.ext import commands
+import time
+import requests
 
-# ==== CONFIGURATION ====
-BOT_TOKEN = "PLACEHOLDER"
-SERVER_ID = 1403091108602576966
-CHARACTER_NAMES_FILE = "characters.txt"
-MAX_OPTIONS_PER_MENU = 25
-MAX_MENUS_PER_MESSAGE = 5
+# ==== CONFIGURATION — fill these in ====
+BOT_TOKEN = "PLACEHOLDER"        # From Discord Developer Portal > Bot tab
+GUILD_ID = "1403091108602576966"         # Right-click your server icon > Copy Server ID
+CHARACTER_NAMES_FILE = "characters.txt"  # One character/role name per line
 
-# ==== SETUP ====
-intents = discord.Intents.default()
-bot = commands.Bot(command_prefix="!", intents=intents)
+# ==== SCRIPT — no need to edit below this line ====
+API_BASE = "https://discord.com/api/v10"
+HEADERS = {
+    "Authorization": f"Bot {BOT_TOKEN}",
+    "Content-Type": "application/json",
+}
 
 
-def load_character_chunks() -> list[list[str]]:
-    """Read characters.txt and split it into chunks of MAX_OPTIONS_PER_MENU."""
+def get_existing_role_names() -> set[str]:
+    """Fetch the server's current roles so we can skip ones that already exist."""
+    url = f"{API_BASE}/guilds/{GUILD_ID}/roles"
+    response = requests.get(url, headers=HEADERS)
+    response.raise_for_status()
+    return {role["name"] for role in response.json()}
+
+
+def create_role(name: str) -> None:
+    """Create a single role in the target server, retrying if rate-limited."""
+    url = f"{API_BASE}/guilds/{GUILD_ID}/roles"
+    payload = {"name": name, "mentionable": True}
+    response = requests.post(url, headers=HEADERS, json=payload)
+
+    if response.status_code in (200, 201):
+        print(f"✅ Created role: {name}")
+    elif response.status_code == 429:
+        retry_after = response.json().get("retry_after", 1)
+        print(f"⏳ Rate limited — waiting {retry_after}s before retrying '{name}'...")
+        time.sleep(retry_after)
+        create_role(name)
+    else:
+        print(f"❌ Failed to create '{name}': {response.status_code} {response.text}")
+
+
+def main() -> None:
     with open(CHARACTER_NAMES_FILE, "r", encoding="utf-8") as f:
         names = [line.strip() for line in f if line.strip()]
-    return [
-        names[i:i + MAX_OPTIONS_PER_MENU]
-        for i in range(0, len(names), MAX_OPTIONS_PER_MENU)
-    ]
 
+    if not names:
+        print(f"No names found in {CHARACTER_NAMES_FILE} — nothing to do.")
+        return
 
-def group_chunks_into_messages(chunks: list[list[str]]) -> list[list[list[str]]]:
-    """Group chunks into batches of up to MAX_MENUS_PER_MESSAGE dropdowns each."""
-    return [
-        chunks[i:i + MAX_MENUS_PER_MESSAGE]
-        for i in range(0, len(chunks), MAX_MENUS_PER_MESSAGE)
-    ]
+    print("Checking which roles already exist...")
+    existing_names = get_existing_role_names()
 
+    to_create = [name for name in names if name not in existing_names]
+    skipped = len(names) - len(to_create)
 
-class CharacterSelect(discord.ui.Select):
-    """One dropdown covering up to 25 characters. Submitting it syncs your
-    roles to match exactly what's checked in THIS dropdown — other dropdowns
-    are untouched."""
+    if skipped:
+        print(f"Skipping {skipped} role(s) that already exist.")
 
-    def __init__(self, chunk_index: int, names: list[str], server: discord.server):
-        self.role_by_value: dict[str, discord.Role] = {}
-        options = []
-        for name in names:
-            role = discord.utils.get(server.roles, name=name)
-            if role is None:
-                print(f"No role found matching '{name}' — skipping from menu.")
-                continue
-            self.role_by_value[str(role.id)] = role
-            options.append(discord.SelectOption(label=name, value=str(role.id)))
+    if not to_create:
+        print("Nothing left to create — all roles already exist.")
+        return
 
-        first_num = chunk_index * MAX_OPTIONS_PER_MENU + 1
-        last_num = chunk_index * MAX_OPTIONS_PER_MENU + len(options)
+    print(f"Creating {len(to_create)} role(s)...")
+    for name in to_create:
+        create_role(name)
+        time.sleep(0.5)  # small buffer to stay comfortably under Discord's rate limits
 
-        super().__init__(
-            custom_id=f"char_role_menu_{chunk_index}",
-            placeholder=f"Characters {first_num}–{last_num}",
-            min_values=0,
-            max_values=len(options) if options else 1,
-            options=options or [discord.SelectOption(label="(no roles found)", value="none")],
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        member = interaction.user
-        selected_ids = set(self.values)
-        to_add, to_remove = [], []
-
-        for value, role in self.role_by_value.items():
-            has_role = role in member.roles
-            if value in selected_ids and not has_role:
-                to_add.append(role)
-            elif value not in selected_ids and has_role:
-                to_remove.append(role)
-
-        if to_add:
-            await member.add_roles(*to_add, reason="Character role picker")
-        if to_remove:
-            await member.remove_roles(*to_remove, reason="Character role picker")
-
-        summary_parts = []
-        if to_add:
-            summary_parts.append("Added: " + ", ".join(r.name for r in to_add))
-        if to_remove:
-            summary_parts.append("Removed: " + ", ".join(r.name for r in to_remove))
-        summary = "\n".join(summary_parts) if summary_parts else "No changes."
-
-        await interaction.response.send_message(summary, ephemeral=True)
-
-
-class CharacterRoleView(discord.ui.View):
-    """A persistent view holding up to 5 dropdowns for one message."""
-
-    def __init__(self, chunk_group: list[list[str]], start_index: int, server: discord.server):
-        super().__init__(timeout=None)
-        for offset, names in enumerate(chunk_group):
-            self.add_item(CharacterSelect(start_index + offset, names, server))
-
-
-@bot.event
-async def on_ready():
-    server = bot.get_server(SERVER_ID)
-    chunks = load_character_chunks()
-    message_groups = group_chunks_into_messages(chunks)
-
-    # Re-register a persistent view for every message group so dropdowns
-    # posted before a restart keep working afterward.
-    start_index = 0
-    for group in message_groups:
-        bot.add_view(CharacterRoleView(group, start_index, server))
-        start_index += len(group)
-
-    await bot.tree.sync(server=server)
-    print(f"✅ Logged in as {bot.user}. Ready in {server.name}.")
-
-
-@bot.tree.command(
-    name="post-role-menus",
-    description="Post the character role picker dropdowns in this channel.",
-    server=discord.Object(id=SERVER_ID),
-)
-@app_commands.checks.has_permissions(manage_roles=True)
-async def post_role_menus(interaction: discord.Interaction):
-    server = interaction.server
-    chunks = load_character_chunks()
-    message_groups = group_chunks_into_messages(chunks)
-
-    await interaction.response.send_message(
-        f"Posting {len(message_groups)} message(s) with role pickers...",
-        ephemeral=True,
-    )
-
-    start_index = 0
-    for i, group in enumerate(message_groups, start=1):
-        view = CharacterRoleView(group, start_index, server)
-        await interaction.channel.send(
-            f"**Pick your favorite characters — part {i}/{len(message_groups)}**\n"
-            "Select as many as you want from each dropdown below.",
-            view=view,
-        )
-        start_index += len(group)
+    print("Done!")
 
 
 if __name__ == "__main__":
-    bot.run(BOT_TOKEN)
+    main()
